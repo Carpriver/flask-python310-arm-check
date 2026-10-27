@@ -1,0 +1,78 @@
+name: Windows ARM - Flask Python 3.10
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flask-arm-check
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    env:
+      CLASS_CI: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout public verification sources
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Verify actual ARM64 host
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $os = Get-CimInstance Win32_OperatingSystem
+          $cpu | Select-Object Name,Architecture | Format-List
+          $os | Select-Object Caption,Version,BuildNumber | Format-List
+          if ([int]$cpu.Architecture -ne 12) { throw 'Expected a real ARM64 host' }
+          if ([int]$os.BuildNumber -lt 22000) { throw 'Expected Windows 11' }
+
+      - name: Install official x64 Miniconda on the ARM64 host
+        run: |
+          $url = 'https://repo.anaconda.com/miniconda/Miniconda3-py314_26.9.3-0-Windows-x86_64.exe'
+          $expected = '657ea0a3a2b7ddfdbb163a921edd5b4ad9b44e343d3b43a2a4100aeabe160b08'
+          $installer = Join-Path $env:RUNNER_TEMP 'Miniconda3-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'Installer SHA256 mismatch' }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid') { throw 'Installer signature is not valid' }
+          $process = Start-Process -FilePath $installer -ArgumentList '/S','/InstallationType=JustMe','/RegisterPython=0','/AddToPath=0','/D=C:\Miniconda3-x64' -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "Installer exit $($process.ExitCode)" }
+          & C:\Miniconda3-x64\python.exe -I -B ci_checks.py baseline
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline Python 3.14 check failed' }
+
+      - name: Run the distributed preflight batch
+        shell: cmd
+        run: call 00_diagnose.bat C:\Miniconda3-x64
+
+      - name: Create separate flask_python310 with the distributed batch
+        shell: cmd
+        run: call 01_setup.bat C:\Miniconda3-x64
+
+      - name: Run distributed dependency and Flask checks
+        shell: cmd
+        run: call 02_check.bat C:\Miniconda3-x64
+
+      - name: Configure VS Code defaults with the distributed batch
+        shell: cmd
+        run: call 03_configure_vscode.bat C:\Miniconda3-x64
+
+      - name: Verify activation, HTTP server, and retained Python 3.14
+        run: |
+          & C:\Miniconda3-x64\python.exe -I -B ci_checks.py final
+          if ($LASTEXITCODE -ne 0) { throw 'Final verification failed' }
+
+      - name: Print diagnostics on failure
+        if: failure()
+        run: |
+          Get-ChildItem -LiteralPath .\logs -Filter *.txt -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Output ('Log: ' + $_.Name)
+            Get-Content -LiteralPath $_.FullName -Tail 100
+          }
