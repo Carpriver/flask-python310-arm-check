@@ -1,0 +1,10 @@
+# Windows x64; on ARM64 requires Windows 11 x64 emulation (unverified on student PC).
+# Use 01_setup.bat for platform selection and collision protection.
+name: flask_python310
+channels:
+  - defaults
+dependencies:
+  - python=3.10.20
+  - pip=26.1.2
+  - pip:
+      - -r requirements.txt
